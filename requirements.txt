@@ -1,0 +1,9 @@
+streamlit
+python-dotenv
+groq
+pymupdf
+sentence-transformers
+qdrant-client
+torch
+torchvision
+numpy
