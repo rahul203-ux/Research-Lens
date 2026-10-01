@@ -1,4 +1,3 @@
-
 """
 ResearchLens - Grounded RAG Research Paper Assistant
 """
@@ -55,6 +54,9 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 MAX_SOURCES = 5
 MIN_RANKING = 0.3
 
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+
 
 # ============================================================
 # DIRECTORIES
@@ -80,6 +82,18 @@ if "processing_done" not in st.session_state:
 
 if "current_file_name" not in st.session_state:
     st.session_state.current_file_name = None
+
+if "pages_data" not in st.session_state:
+    st.session_state.pages_data = []
+
+if "chunks_data" not in st.session_state:
+    st.session_state.chunks_data = []
+
+if "embedding_data" not in st.session_state:
+    st.session_state.embedding_data = None
+
+if "qdrant_info" not in st.session_state:
+    st.session_state.qdrant_info = None
 
 
 # ============================================================
@@ -125,9 +139,9 @@ with st.sidebar:
     st.divider()
 
     st.info(
-        "ResearchLens processes one uploaded research paper "
-        "at a time. When a new paper is uploaded, the previous "
-        "paper's vectors are removed from Qdrant."
+        "ResearchLens processes one research paper at a time. "
+        "The uploaded paper is converted into chunks, embeddings, "
+        "and Qdrant vectors before question answering."
     )
 
 
@@ -137,22 +151,42 @@ with st.sidebar:
 
 st.markdown("### 🔄 RAG Pipeline")
 
-pipeline = [
-    "📄 PDF Upload",
-    "📝 Text Extraction",
-    "✂️ Chunking",
-    "🔢 Embeddings",
-    "🗄️ Qdrant",
-    "🎯 Semantic Ranking",
-    "🤖 LLM Answer",
+st.caption(
+    "Click a processing stage below to view its details."
+)
+
+pipeline_cols = st.columns(7)
+
+pipeline_steps = [
+    ("📄", "PDF Upload"),
+    ("📝", "Text Extraction"),
+    ("✂️", "Chunking"),
+    ("🔢", "Embeddings"),
+    ("🗄️", "Qdrant"),
+    ("🎯", "Semantic Ranking"),
+    ("🤖", "LLM Answer"),
 ]
 
-cols = st.columns(len(pipeline))
-
-for col, step in zip(cols, pipeline):
-
+for col, (icon, name) in zip(
+    pipeline_cols,
+    pipeline_steps,
+):
     with col:
-        st.info(step)
+        st.markdown(
+            f"""
+            <div style="
+                text-align:center;
+                padding:10px;
+                border:1px solid #444;
+                border-radius:10px;
+                background-color:#111827;
+            ">
+                <div style="font-size:24px;">{icon}</div>
+                <div style="font-size:13px;">{name}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ============================================================
@@ -206,7 +240,7 @@ if uploaded_file is not None:
             )
 
             # ====================================================
-            # PROCESSING STATUS
+            # PROCESSING
             # ====================================================
 
             with st.status(
@@ -215,7 +249,7 @@ if uploaded_file is not None:
             ) as status:
 
                 # ====================================================
-                # REMOVE PREVIOUS QDRANT COLLECTION
+                # REMOVE PREVIOUS COLLECTION
                 # ====================================================
 
                 st.write(
@@ -253,7 +287,7 @@ if uploaded_file is not None:
                         raise e
 
                 # ====================================================
-                # CREATE FRESH COLLECTION
+                # CREATE COLLECTION
                 # ====================================================
 
                 st.write(
@@ -267,7 +301,7 @@ if uploaded_file is not None:
                 )
 
                 # ====================================================
-                # STEP 1 - TEXT EXTRACTION
+                # TEXT EXTRACTION
                 # ====================================================
 
                 st.write(
@@ -299,7 +333,7 @@ if uploaded_file is not None:
                 )
 
                 # ====================================================
-                # STEP 2 - CHUNKING
+                # CHUNKING
                 # ====================================================
 
                 st.write(
@@ -308,8 +342,8 @@ if uploaded_file is not None:
 
                 chunks = create_chunks(
                     pages,
-                    chunk_size=1000,
-                    chunk_overlap=200,
+                    chunk_size=CHUNK_SIZE,
+                    chunk_overlap=CHUNK_OVERLAP,
                 )
 
                 chunk_count = len(chunks)
@@ -319,7 +353,7 @@ if uploaded_file is not None:
                 )
 
                 # ====================================================
-                # STEP 3 - EMBEDDINGS
+                # EMBEDDINGS
                 # ====================================================
 
                 st.write(
@@ -341,9 +375,7 @@ if uploaded_file is not None:
                         embeddings
                     )
 
-                    if len(
-                        embeddings.shape
-                    ) > 1:
+                    if len(embeddings.shape) > 1:
 
                         embedding_dimension = (
                             embeddings.shape[1]
@@ -371,7 +403,7 @@ if uploaded_file is not None:
                 )
 
                 # ====================================================
-                # STEP 4 - QDRANT
+                # QDRANT
                 # ====================================================
 
                 if (
@@ -401,7 +433,7 @@ if uploaded_file is not None:
                     )
 
                 # ====================================================
-                # PROCESSING COMPLETE
+                # COMPLETE
                 # ====================================================
 
                 status.update(
@@ -412,7 +444,7 @@ if uploaded_file is not None:
                 )
 
             # ========================================================
-            # SAVE SESSION INFORMATION
+            # SAVE PROCESSING INFORMATION
             # ========================================================
 
             st.session_state.paper_info = {
@@ -434,6 +466,23 @@ if uploaded_file is not None:
 
                 "embedding_model":
                     EMBEDDING_MODEL,
+            }
+
+            st.session_state.pages_data = pages
+
+            st.session_state.chunks_data = chunks
+
+            st.session_state.embedding_data = embeddings
+
+            st.session_state.qdrant_info = {
+
+                "collection_name": COLLECTION_NAME,
+
+                "vector_count": embedding_count,
+
+                "vector_dimension":
+                    embedding_dimension,
+
             }
 
             st.session_state.current_file_name = (
@@ -466,7 +515,7 @@ if uploaded_file is not None:
 
 
 # ============================================================
-# PAPER PROCESSING INFORMATION
+# CLICKABLE PROCESSING MODULES
 # ============================================================
 
 if st.session_state.paper_info is not None:
@@ -479,85 +528,361 @@ if st.session_state.paper_info is not None:
         "📊 Research Paper Processing"
     )
 
-    # ========================================================
-    # MAIN METRICS
-    # ========================================================
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-
-        st.metric(
-            "📄 Pages",
-            info["page_count"],
-        )
-
-    with col2:
-
-        st.metric(
-            "✂️ Chunks",
-            info["chunk_count"],
-        )
-
-    with col3:
-
-        st.metric(
-            "🔢 Embeddings",
-            info["embedding_count"],
-        )
-
-    with col4:
-
-        st.metric(
-            "📐 Vector Dimension",
-            info["embedding_dimension"],
-        )
-
     st.caption(
-        f"File: {info['file_name']} | "
-        f"Size: {info['file_size_mb']:.2f} MB | "
-        f"Extracted characters: "
-        f"{info['total_characters']:,}"
+        "Click each module to inspect what happened "
+        "during the RAG pipeline."
     )
 
     # ========================================================
-    # PROCESSING DETAILS
+    # PDF UPLOAD
     # ========================================================
 
-    st.markdown(
-        "### 🔍 Processing Details"
-    )
-
-    detail_cols = st.columns(5)
-
-    with detail_cols[0]:
+    with st.expander(
+        "📄 PDF Upload",
+        expanded=False,
+    ):
 
         st.success(
-            "📄\n\n**PDF Upload**"
+            "PDF uploaded successfully."
         )
 
-    with detail_cols[1]:
+        col1, col2, col3 = st.columns(3)
 
-        st.success(
-            "📝\n\n**Text Extraction**"
+        with col1:
+
+            st.metric(
+                "File",
+                info["file_name"],
+            )
+
+        with col2:
+
+            st.metric(
+                "File Size",
+                f"{info['file_size_mb']:.2f} MB",
+            )
+
+        with col3:
+
+            st.metric(
+                "Pages",
+                info["page_count"],
+            )
+
+        st.write(
+            f"**File path:** "
+            f"`data/uploads/{info['file_name']}`"
         )
 
-    with detail_cols[2]:
+    # ========================================================
+    # TEXT EXTRACTION
+    # ========================================================
+
+    with st.expander(
+        "📝 Text Extraction",
+        expanded=False,
+    ):
 
         st.success(
-            "✂️\n\n**Chunking**"
+            "Text extracted successfully using PyMuPDF."
         )
 
-    with detail_cols[3]:
+        col1, col2 = st.columns(2)
 
-        st.success(
-            "🔢\n\n**Embeddings**"
+        with col1:
+
+            st.metric(
+                "Pages Processed",
+                info["page_count"],
+            )
+
+        with col2:
+
+            st.metric(
+                "Characters Extracted",
+                f"{info['total_characters']:,}",
+            )
+
+        st.markdown(
+            "### 📖 Extracted Page Details"
         )
 
-    with detail_cols[4]:
+        for page in st.session_state.pages_data:
+
+            page_number = page.get(
+                "page_number",
+                "Unknown",
+            )
+
+            page_text = page.get(
+                "text",
+                "",
+            )
+
+            with st.expander(
+                f"Page {page_number}"
+            ):
+
+                st.write(
+                    f"Characters: **{len(page_text):,}**"
+                )
+
+                st.text(
+                    page_text[:3000]
+                )
+
+                if len(page_text) > 3000:
+
+                    st.caption(
+                        "Showing first 3,000 characters."
+                    )
+
+    # ========================================================
+    # CHUNKING
+    # ========================================================
+
+    with st.expander(
+        "✂️ Chunking",
+        expanded=False,
+    ):
 
         st.success(
-            "🗄️\n\n**Qdrant**"
+            "Text was split into overlapping chunks."
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Total Chunks",
+                info["chunk_count"],
+            )
+
+        with col2:
+
+            st.metric(
+                "Chunk Size",
+                CHUNK_SIZE,
+            )
+
+        with col3:
+
+            st.metric(
+                "Overlap",
+                CHUNK_OVERLAP,
+            )
+
+        st.markdown(
+            "### 🧩 Generated Chunks"
+        )
+
+        for chunk in st.session_state.chunks_data:
+
+            chunk_id = chunk.get(
+                "chunk_id",
+                "Unknown",
+            )
+
+            page_number = chunk.get(
+                "page_number",
+                "Unknown",
+            )
+
+            text = chunk.get(
+                "text",
+                "",
+            )
+
+            with st.expander(
+                f"Chunk {chunk_id} — Page {page_number}"
+            ):
+
+                st.write(
+                    f"**Chunk ID:** {chunk_id}"
+                )
+
+                st.write(
+                    f"**Page:** {page_number}"
+                )
+
+                st.write(
+                    f"**Characters:** {len(text):,}"
+                )
+
+                st.text(text)
+
+    # ========================================================
+    # EMBEDDINGS
+    # ========================================================
+
+    with st.expander(
+        "🔢 Embeddings",
+        expanded=False,
+    ):
+
+        st.success(
+            "Text chunks were converted into numerical vectors."
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Embedding Model",
+                info["embedding_model"],
+            )
+
+        with col2:
+
+            st.metric(
+                "Embeddings",
+                info["embedding_count"],
+            )
+
+        with col3:
+
+            st.metric(
+                "Vector Dimension",
+                info["embedding_dimension"],
+            )
+
+        st.write(
+            "Each text chunk is represented by a "
+            f"**{info['embedding_dimension']}-dimensional vector**."
+        )
+
+        st.markdown(
+            "### 🔢 Sample Embedding Vector"
+        )
+
+        if (
+            st.session_state.embedding_data is not None
+            and len(st.session_state.embedding_data) > 0
+        ):
+
+            first_vector = (
+                st.session_state.embedding_data[0]
+            )
+
+            st.write(
+                f"Embedding for **Chunk 1**:"
+            )
+
+            st.code(
+                str(
+                    first_vector[:20]
+                )
+                + "\n..."
+            )
+
+            st.caption(
+                f"Showing first 20 values of "
+                f"{info['embedding_dimension']} dimensions."
+            )
+
+    # ========================================================
+    # QDRANT
+    # ========================================================
+
+    with st.expander(
+        "🗄️ Qdrant Vector Database",
+        expanded=False,
+    ):
+
+        st.success(
+            "Current paper vectors were stored in Qdrant."
+        )
+
+        qdrant_info = (
+            st.session_state.qdrant_info
+        )
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+
+            st.metric(
+                "Collection",
+                qdrant_info["collection_name"],
+            )
+
+        with col2:
+
+            st.metric(
+                "Stored Vectors",
+                qdrant_info["vector_count"],
+            )
+
+        with col3:
+
+            st.metric(
+                "Vector Dimension",
+                qdrant_info["vector_dimension"],
+            )
+
+        st.write(
+            "Qdrant stores the embeddings together with "
+            "their chunk ID, page number, and original text."
+        )
+
+        st.code(
+            f"Collection: {qdrant_info['collection_name']}\n"
+            f"Vectors: {qdrant_info['vector_count']}\n"
+            f"Dimension: {qdrant_info['vector_dimension']}\n"
+            f"Distance: COSINE"
+        )
+
+    # ========================================================
+    # SEMANTIC RANKING
+    # ========================================================
+
+    with st.expander(
+        "🎯 Semantic Ranking",
+        expanded=False,
+    ):
+
+        st.info(
+            "When a question is asked, the question is converted "
+            "into an embedding and compared with stored document "
+            "vectors using semantic similarity."
+        )
+
+        st.write(
+            f"**Maximum sources:** {MAX_SOURCES}"
+        )
+
+        st.write(
+            f"**Minimum ranking threshold:** {MIN_RANKING}"
+        )
+
+        st.write(
+            "Higher ranking scores indicate stronger semantic "
+            "similarity between the question and retrieved chunks."
+        )
+
+    # ========================================================
+    # LLM
+    # ========================================================
+
+    with st.expander(
+        "🤖 LLM Answer Generation",
+        expanded=False,
+    ):
+
+        st.info(
+            "The retrieved chunks are provided to the LLM as "
+            "context. The LLM generates an answer grounded "
+            "in the uploaded research paper."
+        )
+
+        st.write(
+            f"**LLM Model:** `{MODEL_NAME}`"
+        )
+
+        st.write(
+            f"**Maximum retrieved sources:** `{MAX_SOURCES}`"
         )
 
 
@@ -580,9 +905,8 @@ if st.session_state.paper_info is not None:
     )
 
     st.caption(
-        "Only this paper is currently stored in "
-        "the Qdrant collection and used for "
-        "question answering."
+        "Only this paper is currently stored in the "
+        "Qdrant collection and used for question answering."
     )
 
 
@@ -679,10 +1003,6 @@ if ask_button:
                 st.markdown(
                     "## 📚 Retrieved Sources"
                 )
-
-                # ====================================================
-                # SOURCE STATISTICS
-                # ====================================================
 
                 rankings = [
                     source.get(

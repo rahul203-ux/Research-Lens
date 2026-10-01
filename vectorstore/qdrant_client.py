@@ -17,9 +17,7 @@ from qdrant_client.models import (
 
 load_dotenv()
 
-
 QDRANT_URL = os.getenv("QDRANT_URL")
-
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
@@ -42,15 +40,13 @@ def get_qdrant_client():
     """
 
     if not QDRANT_URL:
-
         raise ValueError(
-            "QDRANT_URL is missing from .env"
+            "QDRANT_URL is missing from environment variables."
         )
 
     if not QDRANT_API_KEY:
-
         raise ValueError(
-            "QDRANT_API_KEY is missing from .env"
+            "QDRANT_API_KEY is missing from environment variables."
         )
 
     client = QdrantClient(
@@ -73,17 +69,11 @@ def create_collection():
 
     client = get_qdrant_client()
 
-
-    # Get existing collections
-
     existing_collections = [
         collection.name
         for collection
         in client.get_collections().collections
     ]
-
-
-    # Check whether our collection already exists
 
     if COLLECTION_NAME in existing_collections:
 
@@ -92,9 +82,6 @@ def create_collection():
         )
 
         return
-
-
-    # Create new collection
 
     client.create_collection(
 
@@ -108,11 +95,51 @@ def create_collection():
         )
     )
 
-
     print(
         f"Collection '{COLLECTION_NAME}' "
         "created successfully."
     )
+
+
+# ============================================================
+# CLEAR PREVIOUS DOCUMENT
+# ============================================================
+
+def clear_collection():
+    """
+    Delete the existing ResearchLens collection.
+
+    ResearchLens follows a single-document workflow.
+    When a new PDF is uploaded, the previous document's
+    vectors must be removed so that retrieval cannot return
+    information from an older document.
+    """
+
+    client = get_qdrant_client()
+
+    existing_collections = [
+        collection.name
+        for collection
+        in client.get_collections().collections
+    ]
+
+    if COLLECTION_NAME in existing_collections:
+
+        client.delete_collection(
+            collection_name=COLLECTION_NAME
+        )
+
+        print(
+            f"Previous collection '{COLLECTION_NAME}' "
+            "deleted successfully."
+        )
+
+    else:
+
+        print(
+            f"Collection '{COLLECTION_NAME}' "
+            "does not exist. Nothing to clear."
+        )
 
 
 # ============================================================
@@ -132,8 +159,10 @@ def upload_embeddings(chunks, embeddings):
         text
     """
 
-    client = get_qdrant_client()
+    # Make sure collection exists
+    create_collection()
 
+    client = get_qdrant_client()
 
     # --------------------------------------------------------
     # Validate input
@@ -146,9 +175,9 @@ def upload_embeddings(chunks, embeddings):
             f"Number of chunks ({len(chunks)}) "
 
             f"does not match number of embeddings "
+
             f"({len(embeddings)})."
         )
-
 
     # --------------------------------------------------------
     # Prepare Qdrant points
@@ -156,14 +185,12 @@ def upload_embeddings(chunks, embeddings):
 
     points = []
 
-
     for index, (chunk, embedding) in enumerate(
 
         zip(chunks, embeddings),
 
         start=1
     ):
-
 
         point = PointStruct(
 
@@ -181,9 +208,7 @@ def upload_embeddings(chunks, embeddings):
             }
         )
 
-
         points.append(point)
-
 
     # --------------------------------------------------------
     # Upload to Qdrant
@@ -195,7 +220,6 @@ def upload_embeddings(chunks, embeddings):
 
         points=points
     )
-
 
     print(
         f"Successfully uploaded "
@@ -224,7 +248,6 @@ def search_vectors(query_embedding, top_k=5):
 
     client = get_qdrant_client()
 
-
     # --------------------------------------------------------
     # Search Qdrant
     # --------------------------------------------------------
@@ -239,6 +262,5 @@ def search_vectors(query_embedding, top_k=5):
 
         with_payload=True
     )
-
 
     return results.points
