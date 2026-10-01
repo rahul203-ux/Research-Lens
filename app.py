@@ -1,3 +1,4 @@
+
 """
 ResearchLens - Grounded RAG Research Paper Assistant
 """
@@ -9,9 +10,17 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from services.chat_service import answer_question
+
 from ingestion.pdf_loader import extract_text_from_pdf
 from ingestion.chunker import create_chunks
 from ingestion.embedder import create_embeddings
+
+from vectorstore.qdrant_client import (
+    get_qdrant_client,
+    COLLECTION_NAME,
+    create_collection,
+    upload_embeddings,
+)
 
 
 # ============================================================
@@ -46,8 +55,17 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 MAX_SOURCES = 5
 MIN_RANKING = 0.3
 
+
+# ============================================================
+# DIRECTORIES
+# ============================================================
+
 UPLOAD_DIR = Path("data") / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 
 # ============================================================
@@ -59,6 +77,9 @@ if "paper_info" not in st.session_state:
 
 if "processing_done" not in st.session_state:
     st.session_state.processing_done = False
+
+if "current_file_name" not in st.session_state:
+    st.session_state.current_file_name = None
 
 
 # ============================================================
@@ -85,7 +106,9 @@ with st.sidebar:
 
     st.header("⚙️ Settings")
 
-    st.write(f"**LLM Model:** `{MODEL_NAME}`")
+    st.write(
+        f"**LLM Model:** `{MODEL_NAME}`"
+    )
 
     st.write(
         f"**Embedding Model:** `{EMBEDDING_MODEL}`"
@@ -102,9 +125,9 @@ with st.sidebar:
     st.divider()
 
     st.info(
-        "ResearchLens retrieves relevant sections from "
-        "the uploaded research paper and generates "
-        "grounded answers using an LLM."
+        "ResearchLens processes one uploaded research paper "
+        "at a time. When a new paper is uploaded, the previous "
+        "paper's vectors are removed from Qdrant."
     )
 
 
@@ -129,7 +152,6 @@ cols = st.columns(len(pipeline))
 for col, step in zip(cols, pipeline):
 
     with col:
-
         st.info(step)
 
 
@@ -144,60 +166,109 @@ st.header("📄 Upload Research Paper")
 uploaded_file = st.file_uploader(
     "Choose a research paper",
     type=["pdf"],
-    help="Upload a PDF research paper.",
+    help="Upload one PDF research paper.",
 )
 
 
 # ============================================================
-# PROCESS UPLOADED PDF
+# PROCESS PDF
 # ============================================================
 
 if uploaded_file is not None:
 
-    file_path = UPLOAD_DIR / uploaded_file.name
+    new_file = (
+        st.session_state.current_file_name
+        != uploaded_file.name
+    )
 
-    try:
+    if new_file:
 
-        # ----------------------------------------------------
-        # SAVE PDF
-        # ----------------------------------------------------
+        try:
 
-        with open(file_path, "wb") as f:
+            # ====================================================
+            # SAVE PDF
+            # ====================================================
 
-            f.write(
-                uploaded_file.getbuffer()
+            file_path = UPLOAD_DIR / uploaded_file.name
+
+            with open(
+                file_path,
+                "wb",
+            ) as f:
+
+                f.write(
+                    uploaded_file.getbuffer()
+                )
+
+            file_size_mb = (
+                file_path.stat().st_size
+                / (1024 * 1024)
             )
 
-        file_size_mb = (
-            file_path.stat().st_size
-            / (1024 * 1024)
-        )
-
-        st.success(
-            f"Research paper uploaded: "
-            f"**{uploaded_file.name}**"
-        )
-
-        # ----------------------------------------------------
-        # PROCESS ONLY WHEN NEW FILE IS UPLOADED
-        # ----------------------------------------------------
-
-        current_file = st.session_state.paper_info
-
-        if (
-            current_file is None
-            or current_file["file_name"]
-            != uploaded_file.name
-        ):
+            # ====================================================
+            # PROCESSING STATUS
+            # ====================================================
 
             with st.status(
-                "Processing research paper...",
-                expanded=True
+                "🔄 Processing research paper...",
+                expanded=True,
             ) as status:
 
-                # ============================================
+                # ====================================================
+                # REMOVE PREVIOUS QDRANT COLLECTION
+                # ====================================================
+
+                st.write(
+                    "🗑️ Removing previous paper vectors..."
+                )
+
+                client = get_qdrant_client()
+
+                try:
+
+                    client.delete_collection(
+                        collection_name=COLLECTION_NAME
+                    )
+
+                    st.write(
+                        "✓ Previous paper data removed."
+                    )
+
+                except Exception as e:
+
+                    error_text = str(e).lower()
+
+                    if (
+                        "not found" in error_text
+                        or "does not exist" in error_text
+                        or "404" in error_text
+                    ):
+
+                        st.write(
+                            "✓ No previous collection found."
+                        )
+
+                    else:
+
+                        raise e
+
+                # ====================================================
+                # CREATE FRESH COLLECTION
+                # ====================================================
+
+                st.write(
+                    "🗄️ Creating fresh Qdrant collection..."
+                )
+
+                create_collection()
+
+                st.write(
+                    "✓ Fresh Qdrant collection ready."
+                )
+
+                # ====================================================
                 # STEP 1 - TEXT EXTRACTION
-                # ============================================
+                # ====================================================
 
                 st.write(
                     "📝 Extracting text from PDF..."
@@ -210,7 +281,12 @@ if uploaded_file is not None:
                 page_count = len(pages)
 
                 total_characters = sum(
-                    len(page.get("text", ""))
+                    len(
+                        page.get(
+                            "text",
+                            "",
+                        )
+                    )
                     for page in pages
                 )
 
@@ -218,9 +294,13 @@ if uploaded_file is not None:
                     f"✓ Extracted **{page_count} pages**"
                 )
 
-                # ============================================
+                st.write(
+                    f"✓ Extracted **{total_characters:,} characters**"
+                )
+
+                # ====================================================
                 # STEP 2 - CHUNKING
-                # ============================================
+                # ====================================================
 
                 st.write(
                     "✂️ Creating text chunks..."
@@ -238,9 +318,9 @@ if uploaded_file is not None:
                     f"✓ Created **{chunk_count} chunks**"
                 )
 
-                # ============================================
+                # ====================================================
                 # STEP 3 - EMBEDDINGS
-                # ============================================
+                # ====================================================
 
                 st.write(
                     "🔢 Generating embeddings..."
@@ -261,15 +341,24 @@ if uploaded_file is not None:
                         embeddings
                     )
 
-                    embedding_dimension = (
-                        embeddings.shape[1]
-                        if len(embeddings.shape) > 1
-                        else 0
-                    )
+                    if len(
+                        embeddings.shape
+                    ) > 1:
+
+                        embedding_dimension = (
+                            embeddings.shape[1]
+                        )
+
+                    else:
+
+                        embedding_dimension = 0
 
                 else:
 
+                    embeddings = []
+
                     embedding_count = 0
+
                     embedding_dimension = 0
 
                 st.write(
@@ -281,18 +370,50 @@ if uploaded_file is not None:
                     f"**{embedding_dimension}**"
                 )
 
-                # ============================================
-                # COMPLETE
-                # ============================================
+                # ====================================================
+                # STEP 4 - QDRANT
+                # ====================================================
+
+                if (
+                    chunks
+                    and embedding_count > 0
+                ):
+
+                    st.write(
+                        "🗄️ Uploading current paper vectors to Qdrant..."
+                    )
+
+                    upload_embeddings(
+                        chunks,
+                        embeddings,
+                    )
+
+                    st.write(
+                        f"✓ Stored **{embedding_count} vectors** "
+                        "for the current paper."
+                    )
+
+                else:
+
+                    raise ValueError(
+                        "No chunks or embeddings were generated "
+                        "from the uploaded PDF."
+                    )
+
+                # ====================================================
+                # PROCESSING COMPLETE
+                # ====================================================
 
                 status.update(
-                    label="Research paper processing completed!",
+                    label=(
+                        "✅ Research paper processing completed!"
+                    ),
                     state="complete",
                 )
 
-            # ------------------------------------------------
-            # STORE INFORMATION
-            # ------------------------------------------------
+            # ========================================================
+            # SAVE SESSION INFORMATION
+            # ========================================================
 
             st.session_state.paper_info = {
 
@@ -315,24 +436,37 @@ if uploaded_file is not None:
                     EMBEDDING_MODEL,
             }
 
-            st.session_state.processing_done = True
-
-        else:
-
-            st.info(
-                "This paper has already been processed "
-                "in this session."
+            st.session_state.current_file_name = (
+                uploaded_file.name
             )
 
-    except Exception as e:
+            st.session_state.processing_done = True
 
-        st.error(
-            f"❌ Error while processing PDF: {e}"
+            st.success(
+                "Research paper uploaded and processed: "
+                f"**{uploaded_file.name}**"
+            )
+
+        except Exception as e:
+
+            st.session_state.paper_info = None
+
+            st.session_state.processing_done = False
+
+            st.error(
+                f"❌ Error while processing PDF: {e}"
+            )
+
+    else:
+
+        st.success(
+            "Current research paper: "
+            f"**{uploaded_file.name}**"
         )
 
 
 # ============================================================
-# PAPER INFORMATION
+# PAPER PROCESSING INFORMATION
 # ============================================================
 
 if st.session_state.paper_info is not None:
@@ -341,7 +475,13 @@ if st.session_state.paper_info is not None:
 
     st.divider()
 
-    st.header("📊 Research Paper Processing")
+    st.header(
+        "📊 Research Paper Processing"
+    )
+
+    # ========================================================
+    # MAIN METRICS
+    # ========================================================
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -380,122 +520,70 @@ if st.session_state.paper_info is not None:
         f"{info['total_characters']:,}"
     )
 
+    # ========================================================
+    # PROCESSING DETAILS
+    # ========================================================
+
+    st.markdown(
+        "### 🔍 Processing Details"
+    )
+
+    detail_cols = st.columns(5)
+
+    with detail_cols[0]:
+
+        st.success(
+            "📄\n\n**PDF Upload**"
+        )
+
+    with detail_cols[1]:
+
+        st.success(
+            "📝\n\n**Text Extraction**"
+        )
+
+    with detail_cols[2]:
+
+        st.success(
+            "✂️\n\n**Chunking**"
+        )
+
+    with detail_cols[3]:
+
+        st.success(
+            "🔢\n\n**Embeddings**"
+        )
+
+    with detail_cols[4]:
+
+        st.success(
+            "🗄️\n\n**Qdrant**"
+        )
+
 
 # ============================================================
-# PIPELINE DETAILS
+# CURRENT PAPER
 # ============================================================
 
 if st.session_state.paper_info is not None:
 
-    info = st.session_state.paper_info
-
     st.divider()
 
-    st.subheader("🔍 Processing Details")
+    st.subheader(
+        "📚 Current Research Paper"
+    )
 
-    with st.expander(
-        "📄 1. PDF Upload",
-        expanded=False,
-    ):
+    st.write(
+        "📄 **"
+        f"{st.session_state.paper_info['file_name']}"
+        "**"
+    )
 
-        st.write(
-            f"**File:** {info['file_name']}"
-        )
-
-        st.write(
-            f"**Size:** "
-            f"{info['file_size_mb']:.2f} MB"
-        )
-
-    with st.expander(
-        "📝 2. Text Extraction",
-        expanded=False,
-    ):
-
-        st.write(
-            f"**Pages processed:** "
-            f"{info['page_count']}"
-        )
-
-        st.write(
-            f"**Characters extracted:** "
-            f"{info['total_characters']:,}"
-        )
-
-    with st.expander(
-        "✂️ 3. Chunking",
-        expanded=False,
-    ):
-
-        st.write(
-            f"**Chunks created:** "
-            f"{info['chunk_count']}"
-        )
-
-        st.write(
-            "**Chunk size:** 1000 characters"
-        )
-
-        st.write(
-            "**Chunk overlap:** 200 characters"
-        )
-
-    with st.expander(
-        "🔢 4. Embeddings",
-        expanded=False,
-    ):
-
-        st.write(
-            f"**Embedding model:** "
-            f"{info['embedding_model']}"
-        )
-
-        st.write(
-            f"**Embeddings generated:** "
-            f"{info['embedding_count']}"
-        )
-
-        st.write(
-            f"**Vector dimension:** "
-            f"{info['embedding_dimension']}"
-        )
-
-    with st.expander(
-        "🗄️ 5. Qdrant Vector Database",
-        expanded=False,
-    ):
-
-        st.write(
-            "The existing Qdrant vector-store and "
-            "retrieval pipeline is used when a question "
-            "is submitted."
-        )
-
-        st.info(
-            "Qdrant retrieval details are shown below "
-            "after asking a question."
-        )
-
-
-# ============================================================
-# UPLOADED PAPERS
-# ============================================================
-
-uploaded_files = list(
-    UPLOAD_DIR.glob("*.pdf")
-)
-
-if uploaded_files:
-
-    st.divider()
-
-    st.subheader("📚 Uploaded Papers")
-
-    for pdf in uploaded_files:
-
-        st.write(
-            f"📄 **{pdf.name}**"
-        )
+    st.caption(
+        "Only this paper is currently stored in "
+        "the Qdrant collection and used for "
+        "question answering."
+    )
 
 
 # ============================================================
@@ -504,14 +592,18 @@ if uploaded_files:
 
 st.divider()
 
-st.header("💬 Ask a Question")
+st.header(
+    "💬 Ask a Question"
+)
 
 question = st.text_area(
     "Enter your question",
+
     placeholder=(
         "Example: What are the limitations "
         "of the proposed system?"
     ),
+
     height=120,
 )
 
@@ -539,10 +631,10 @@ if ask_button:
             "Please enter a question."
         )
 
-    elif not uploaded_files:
+    elif st.session_state.paper_info is None:
 
         st.warning(
-            "Please upload a research paper first."
+            "Please upload and process a research paper first."
         )
 
     else:
@@ -550,18 +642,21 @@ if ask_button:
         try:
 
             with st.spinner(
-                "🔄 Searching Qdrant and generating answer..."
+                "🔍 Searching the uploaded paper..."
             ):
 
                 result = answer_question(
-                    question.strip()
+                    question.strip(),
+                    top_k=MAX_SOURCES,
                 )
 
-            # ------------------------------------------------
+            # ====================================================
             # ANSWER
-            # ------------------------------------------------
+            # ====================================================
 
-            st.markdown("## 💡 Answer")
+            st.markdown(
+                "## 💡 Answer"
+            )
 
             answer = result.get(
                 "answer",
@@ -570,46 +665,41 @@ if ask_button:
 
             st.markdown(answer)
 
-            # ------------------------------------------------
+            # ====================================================
             # SOURCES
-            # ------------------------------------------------
+            # ====================================================
 
             sources = result.get(
                 "sources",
                 [],
             )
 
-            st.markdown(
-                "## 📚 Retrieved Sources"
-            )
-
             if sources:
 
-                # ============================================
-                # RETRIEVAL SUMMARY
-                # ============================================
+                st.markdown(
+                    "## 📚 Retrieved Sources"
+                )
 
-                rankings = []
+                # ====================================================
+                # SOURCE STATISTICS
+                # ====================================================
 
-                for source in sources:
-
-                    score = source.get(
+                rankings = [
+                    source.get(
                         "ranking_score",
                         0.0,
                     )
+                    for source in sources
+                ]
 
-                    try:
+                best_ranking = max(
+                    rankings
+                )
 
-                        rankings.append(
-                            float(score)
-                        )
-
-                    except (
-                        ValueError,
-                        TypeError,
-                    ):
-
-                        pass
+                average_ranking = (
+                    sum(rankings)
+                    / len(rankings)
+                )
 
                 col1, col2, col3 = st.columns(3)
 
@@ -622,39 +712,21 @@ if ask_button:
 
                 with col2:
 
-                    if rankings:
-
-                        st.metric(
-                            "Best Ranking",
-                            f"{max(rankings):.4f}",
-                        )
-
-                    else:
-
-                        st.metric(
-                            "Best Ranking",
-                            "N/A",
-                        )
+                    st.metric(
+                        "Best Ranking",
+                        f"{best_ranking:.4f}",
+                    )
 
                 with col3:
 
-                    if rankings:
+                    st.metric(
+                        "Average Ranking",
+                        f"{average_ranking:.4f}",
+                    )
 
-                        st.metric(
-                            "Average Ranking",
-                            f"{sum(rankings) / len(rankings):.4f}",
-                        )
-
-                    else:
-
-                        st.metric(
-                            "Average Ranking",
-                            "N/A",
-                        )
-
-                # ============================================
+                # ====================================================
                 # SOURCE DETAILS
-                # ============================================
+                # ====================================================
 
                 for index, source in enumerate(
                     sources,
@@ -682,25 +754,18 @@ if ask_button:
                         f"Chunk {chunk_id}"
                     ):
 
-                        col1, col2 = st.columns(2)
+                        st.write(
+                            f"**Page:** {page}"
+                        )
 
-                        with col1:
+                        st.write(
+                            f"**Chunk ID:** {chunk_id}"
+                        )
 
-                            st.write(
-                                f"**Page:** {page}"
-                            )
-
-                            st.write(
-                                f"**Chunk ID:** "
-                                f"{chunk_id}"
-                            )
-
-                        with col2:
-
-                            st.write(
-                                f"**Ranking Score:** "
-                                f"{ranking:.4f}"
-                            )
+                        st.write(
+                            f"**Ranking Score:** "
+                            f"{ranking:.4f}"
+                        )
 
                         st.markdown(
                             "**Retrieved Text:**"
