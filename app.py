@@ -31,14 +31,26 @@ st.set_page_config(
 # Improve the Streamlit sidebar toggle tap target on mobile.
 st.markdown("""
 <style>
+/* Keep the Streamlit header above the app content. */
+header[data-testid="stHeader"] {
+    z-index: 999999 !important;
+    overflow: visible !important;
+}
+
+/* Support different Streamlit sidebar toggle selectors. */
+header[data-testid="stHeader"] button,
 button[data-testid="stSidebarCollapseButton"],
-button[data-testid="stSidebarExpandButton"] {
-    min-width: 44px !important;
-    min-height: 44px !important;
-    padding: 8px !important;
-    margin-left: 10px !important;
-    margin-top: 6px !important;
-    z-index: 1000 !important;
+button[data-testid="stSidebarExpandButton"],
+button[data-testid="stExpandSidebarButton"] {
+    min-width: 48px !important;
+    min-height: 48px !important;
+    padding: 10px !important;
+    margin: 6px !important;
+    position: relative !important;
+    z-index: 999999 !important;
+    pointer-events: auto !important;
+    cursor: pointer !important;
+    touch-action: manipulation !important;
 }
 </style>
 """, unsafe_allow_html=True)
